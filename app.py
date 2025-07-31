@@ -33,16 +33,14 @@ def check_requirements_met(task, inventory, required_qty):
     return True
 
 # -----------------------------
-# Load & Save Data
+# Load Data
 # -----------------------------
 @st.cache_data
 def load_data():
     if os.path.exists("workers.csv"):
         workers_df = pd.read_csv("workers.csv")
     else:
-        workers_df = pd.DataFrame(columns=[
-            "Worker","Bending","Gluing","Assembling","EdgeScrap","OpenPaper","QualityControl"
-        ])
+        workers_df = pd.DataFrame(columns=["Worker"])
         workers_df.to_csv("workers.csv", index=False)
 
     if os.path.exists("products.csv"):
@@ -57,144 +55,142 @@ def load_data():
     return workers_df, products_df
 
 # -----------------------------
-# Main Scheduling Logic
+# Scheduling Logic
 # -----------------------------
 def assign_tasks(products_to_produce, workers, products_df, slot_duration_minutes=30):
-    try:
-        slot_duration_seconds = slot_duration_minutes * 60
-        workday_minutes = 8 * 60
+    slot_duration_seconds = slot_duration_minutes * 60
+    workday_minutes = 8 * 60
 
-        # Build task data
-        all_task_instances = []
-        for product, qty in products_to_produce.items():
-            tasks = products_df[products_df["Product"] == product].sort_values(by="Result")
-            for _, row in tasks.iterrows():
-                requirements = [] if pd.isna(row["Requirements"]) else [r.strip() for r in str(row["Requirements"]).split(",") if r.strip()]
-                vector = [row["Bending"], row["Gluing"], row["Assembling"], row["EdgeScrap"], row["OpenPaper"], row["QualityControl"]]
-                all_task_instances.append({
-                    "task_id": row["Result"],
-                    "description": row["Task"],
-                    "product": row["Product"],
-                    "requirements": requirements,
-                    "vector": vector,
-                    "time_per_piece": int(row["TimePerPieceSeconds"]),
-                    "remaining_qty": qty
-                })
+    # Build tasks list
+    all_task_instances = []
+    for product, qty in products_to_produce.items():
+        tasks = products_df[products_df["Product"] == product].sort_values(by="Result")
+        for _, row in tasks.iterrows():
+            requirements = [] if pd.isna(row["Requirements"]) else [r.strip() for r in str(row["Requirements"]).split(",") if r.strip()]
+            vector = [row["Bending"], row["Gluing"], row["Assembling"], row["EdgeScrap"], row["OpenPaper"], row["QualityControl"]]
+            all_task_instances.append({
+                "task_id": row["Result"],
+                "description": row["Task"],
+                "product": row["Product"],
+                "requirements": requirements,
+                "vector": vector,
+                "time_per_piece": int(row["TimePerPieceSeconds"]),
+                "remaining_qty": qty
+            })
 
-        # Simulation state
-        current_time_minutes = 0
-        current_day = 1
-        inventory = defaultdict(int)
-        schedule = defaultdict(lambda: defaultdict(lambda: defaultdict(str)))
-        simulation_log = []
-        worker_last_task = {w: None for w in workers}
+    current_time_minutes = 0
+    current_day = 1
+    inventory = defaultdict(int)
+    schedule = defaultdict(lambda: defaultdict(lambda: defaultdict(str)))
+    simulation_log = []
+    worker_last_task = {w: None for w in workers}
 
-        # Identify all OpenPaper tasks
-        open_paper_tasks = [t for t in all_task_instances if t["vector"][4] >= 80]  # OpenPaper >= 80
+    # Identify true OpenPaper tasks for first slot
+    open_paper_tasks = [
+        t for t in all_task_instances
+        if t["vector"][4] >= 80  # High OpenPaper
+        and sum(t["vector"][:4]) < 100  # Low bending, gluing, assembling, edge scrap
+        and len(t["requirements"]) == 0  # No prerequisites
+    ]
 
-        while True:
-            if all(t["remaining_qty"] <= 0 for t in all_task_instances):
-                break
+    while True:
+        if all(t["remaining_qty"] <= 0 for t in all_task_instances):
+            break
 
-            current_day = (current_time_minutes // workday_minutes) + 1
-            current_slot = (current_time_minutes % workday_minutes) // slot_duration_minutes
+        current_day = (current_time_minutes // workday_minutes) + 1
+        current_slot = (current_time_minutes % workday_minutes) // slot_duration_minutes
 
-            # Get available tasks (requirements met)
-            available_tasks = []
-            for t in all_task_instances:
-                if t["remaining_qty"] > 0:
-                    if check_requirements_met(t, inventory, products_to_produce[t["product"]]):
-                        available_tasks.append(t)
+        # Available tasks (dependencies met)
+        available_tasks = []
+        for t in all_task_instances:
+            if t["remaining_qty"] > 0:
+                if check_requirements_met(t, inventory, products_to_produce[t["product"]]):
+                    available_tasks.append(t)
 
-            if not available_tasks:
-                current_time_minutes += slot_duration_minutes
-                continue
-
-            worker_assignments = {}
-
-            # First slot hardcoded to OpenPaper if available
-            if current_time_minutes == 0 and open_paper_tasks:
-                for w in workers:
-                    if open_paper_tasks:
-                        worker_assignments[w] = open_paper_tasks.pop(0)
-            else:
-                for w in workers:
-                    last_task = worker_last_task[w]
-                    if last_task:
-                        # Choose task with highest cosine similarity
-                        best_task = max(available_tasks, key=lambda t: cosine_similarity(last_task["vector"], t["vector"]))
-                    else:
-                        # First task if none assigned before
-                        best_task = max(available_tasks, key=lambda t: t["remaining_qty"])
-                    worker_assignments[w] = best_task
-
-            # Process tasks
-            for w, task in worker_assignments.items():
-                time_remaining = slot_duration_seconds
-                dominant_task = task["task_id"]
-                pieces_total = 0
-
-                while time_remaining > 0 and task:
-                    if task["remaining_qty"] <= 0:
-                        available_tasks = [t for t in available_tasks if t["remaining_qty"] > 0]
-                        if not available_tasks:
-                            break
-                        task = max(available_tasks, key=lambda t: t["remaining_qty"])
-                        continue
-
-                    tpp = task["time_per_piece"]
-                    max_pieces = min(task["remaining_qty"], time_remaining // tpp)
-                    if max_pieces > 0:
-                        task["remaining_qty"] -= max_pieces
-                        inventory[task["task_id"]] += max_pieces
-                        pieces_total += max_pieces
-                        time_spent = max_pieces * tpp
-                        time_remaining -= time_spent
-
-                        simulation_log.append({
-                            "time": format_time(current_time_minutes),
-                            "event": f"Worker {w} produced {max_pieces} pcs of {task['task_id']} ({task['description']})"
-                        })
-                    else:
-                        break
-
-                schedule[current_day][w][current_slot] = f"[{dominant_task}] {task['description']} ({pieces_total} pcs)"
-                worker_last_task[w] = task
-
+        if not available_tasks:
             current_time_minutes += slot_duration_minutes
-            if current_time_minutes > 30 * 48:  # safety limit
-                break
+            continue
 
-        return {
-            "schedule": schedule,
-            "inventory": dict(inventory),
-            "simulation_log": simulation_log,
-            "estimated_days": current_day
-        }
+        worker_assignments = {}
 
-    except Exception as e:
-        st.error(f"Simulation error: {e}")
-        return None
+        # First slot logic
+        if current_time_minutes == 0 and open_paper_tasks:
+            for w in workers:
+                if open_paper_tasks:
+                    worker_assignments[w] = open_paper_tasks.pop(0)
+        else:
+            for w in workers:
+                last_task = worker_last_task[w]
+                if last_task:
+                    # Pick best similarity, tie-breaker by remaining qty
+                    best_task = max(
+                        available_tasks,
+                        key=lambda t: (cosine_similarity(last_task["vector"], t["vector"]), t["remaining_qty"])
+                    )
+                else:
+                    # First task after prep phase: pick biggest remaining qty
+                    best_task = max(available_tasks, key=lambda t: t["remaining_qty"])
+                worker_assignments[w] = best_task
+
+        # Process assignments
+        for w, task in worker_assignments.items():
+            time_remaining = slot_duration_seconds
+            dominant_task = task["task_id"]
+            pieces_total = 0
+
+            while time_remaining > 0 and task:
+                if task["remaining_qty"] <= 0:
+                    available_tasks = [t for t in available_tasks if t["remaining_qty"] > 0]
+                    if not available_tasks:
+                        break
+                    task = max(available_tasks, key=lambda t: t["remaining_qty"])
+                    continue
+
+                tpp = task["time_per_piece"]
+                max_pieces = min(task["remaining_qty"], time_remaining // tpp)
+                if max_pieces > 0:
+                    task["remaining_qty"] -= max_pieces
+                    inventory[task["task_id"]] += max_pieces
+                    pieces_total += max_pieces
+                    time_remaining -= max_pieces * tpp
+
+                    simulation_log.append({
+                        "time": format_time(current_time_minutes),
+                        "event": f"Worker {w} produced {max_pieces} pcs of {task['task_id']} ({task['description']})"
+                    })
+                else:
+                    break
+
+            schedule[current_day][w][current_slot] = f"[{dominant_task}] {task['description']} ({pieces_total} pcs)"
+            worker_last_task[w] = task
+
+        current_time_minutes += slot_duration_minutes
+        if current_time_minutes > 48 * 30:  # Safety cap
+            break
+
+    return {
+        "schedule": schedule,
+        "inventory": dict(inventory),
+        "simulation_log": simulation_log,
+        "estimated_days": current_day
+    }
 
 # -----------------------------
-# Display Functions
+# Display
 # -----------------------------
 def display_schedule(schedule, estimated_days):
     st.subheader("Schedule")
-    if estimated_days > 0:
-        tabs = st.tabs([f"Day {d}" for d in range(1, estimated_days + 1)])
-        for i, day in enumerate(range(1, estimated_days + 1)):
-            with tabs[i]:
-                if day in schedule:
-                    day_schedule = schedule[day]
-                    rows = []
-                    for slot in range(16):
-                        row = {"TIME": format_time(slot * 30)}
-                        for w in sorted(day_schedule.keys()):
-                            row[w] = day_schedule[w].get(slot, "idle")
-                        rows.append(row)
-                    df = pd.DataFrame(rows)
-                    st.dataframe(df, use_container_width=True, hide_index=True)
+    tabs = st.tabs([f"Day {d}" for d in range(1, estimated_days + 1)])
+    for i, day in enumerate(range(1, estimated_days + 1)):
+        with tabs[i]:
+            if day in schedule:
+                rows = []
+                for slot in range(16):
+                    row = {"TIME": format_time(slot * 30)}
+                    for w in sorted(schedule[day].keys()):
+                        row[w] = schedule[day][w].get(slot, "idle")
+                    rows.append(row)
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # -----------------------------
 # Main App
@@ -205,7 +201,7 @@ def main():
     page = st.sidebar.radio("Go to", ["Home","Products","Workers","Production Order"])
     if page == "Home":
         st.header("Welcome")
-        st.write("Cosine similarity-based scheduling with task grouping.")
+        st.write("Cosine similarity-based scheduling with strict prerequisites.")
     elif page == "Products":
         st.header("📦 Product Database")
         st.dataframe(products_df, use_container_width=True)
