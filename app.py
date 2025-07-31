@@ -104,7 +104,7 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
         available_tasks = []
         for t in all_task_instances:
             if t["remaining_qty"] > 0:
-                if check_requirements_met(t, inventory, products_to_produce[t["product"]]):
+                if check_requirements_met(t, inventory, products_to_produce[t["product"]], threshold=0.3):
                     available_tasks.append(t)
 
         if not available_tasks:
