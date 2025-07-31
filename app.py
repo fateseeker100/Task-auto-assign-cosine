@@ -24,11 +24,11 @@ def format_time(minutes):
     minute = minutes % 60
     return f"{hour:02d}:{minute:02d}"
 
-def check_requirements_met(task, inventory, required_qty, threshold=0.3):
+def check_requirements_met(task, inventory, required_qty):
     if not task["requirements"]:
         return True
     for req in task["requirements"]:
-        if inventory[req] < required_qty * threshold:
+        if inventory[req] < required_qty:
             return False
     return True
 
@@ -89,12 +89,18 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
     open_paper_tasks = [
         t for t in all_task_instances
         if t["vector"][4] >= 80  # High OpenPaper
-        and sum(t["vector"][:4]) < 100  # Low bending/gluing/etc.
+        and sum(t["vector"][:4]) < 100  # Low bending, gluing, assembling, edge scrap
         and len(t["requirements"]) == 0  # No prerequisites
     ]
 
-    # Continue until all tasks complete
+    # Main loop: run until all tasks complete
+    loop_counter = 0
     while any(t["remaining_qty"] > 0 for t in all_task_instances):
+        loop_counter += 1
+        if loop_counter > 30 * 16:  # Failsafe: 30 days of 16 slots
+            st.error("Simulation stopped due to exceeding 30 workdays. Check for circular dependencies.")
+            break
+
         current_day = (current_time_minutes // workday_minutes) + 1
         current_slot = (current_time_minutes % workday_minutes) // slot_duration_minutes
 
@@ -102,7 +108,7 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
         available_tasks = []
         for t in all_task_instances:
             if t["remaining_qty"] > 0:
-                if check_requirements_met(t, inventory, products_to_produce[t["product"]], threshold=0.3):
+                if check_requirements_met(t, inventory, products_to_produce[t["product"]]):
                     available_tasks.append(t)
 
         if not available_tasks:
@@ -111,7 +117,7 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
 
         worker_assignments = {}
 
-        # First slot logic: prep tasks first
+        # First slot logic
         if current_time_minutes == 0 and open_paper_tasks:
             for w in workers:
                 if open_paper_tasks:
@@ -119,16 +125,16 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
         else:
             for w in workers:
                 last_task = worker_last_task[w]
-                if last_task and available_tasks:
-                    # Pick best similarity, tie-breaker by qty
+                if last_task:
+                    # Pick best similarity, tie-breaker by remaining qty
                     best_task = max(
                         available_tasks,
                         key=lambda t: (cosine_similarity(last_task["vector"], t["vector"]), t["remaining_qty"])
                     )
                 else:
-                    best_task = max(available_tasks, key=lambda t: t["remaining_qty"]) if available_tasks else None
-                if best_task:
-                    worker_assignments[w] = best_task
+                    # First task after prep phase: pick biggest remaining qty
+                    best_task = max(available_tasks, key=lambda t: t["remaining_qty"])
+                worker_assignments[w] = best_task
 
         # Process assignments
         for w, task in worker_assignments.items():
@@ -164,9 +170,12 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
 
         current_time_minutes += slot_duration_minutes
 
-        # Add a large safety cap for runaway loops
-        if current_time_minutes > 100000:  # ~2000 slots, just in case
-            break
+    # Debug: Check for unfinished tasks
+    unfinished = [t for t in all_task_instances if t["remaining_qty"] > 0]
+    if unfinished:
+        st.warning("Some tasks were not completed:")
+        for t in unfinished:
+            st.write(f"{t['task_id']} ({t['description']}) - Remaining: {t['remaining_qty']} pcs")
 
     return {
         "schedule": schedule,
@@ -201,7 +210,7 @@ def main():
     page = st.sidebar.radio("Go to", ["Home","Products","Workers","Production Order"])
     if page == "Home":
         st.header("Welcome")
-        st.write("Cosine similarity-based scheduling with overlap rule.")
+        st.write("Cosine similarity-based scheduling with strict prerequisites.")
     elif page == "Products":
         st.header("📦 Product Database")
         st.dataframe(products_df, use_container_width=True)
