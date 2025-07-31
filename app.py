@@ -89,14 +89,12 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
     open_paper_tasks = [
         t for t in all_task_instances
         if t["vector"][4] >= 80  # High OpenPaper
-        and sum(t["vector"][:4]) < 100  # Low bending, gluing, assembling, edge scrap
+        and sum(t["vector"][:4]) < 100  # Low bending/gluing/etc.
         and len(t["requirements"]) == 0  # No prerequisites
     ]
 
-    while True:
-        if all(t["remaining_qty"] <= 0 for t in all_task_instances):
-            break
-
+    # Continue until all tasks complete
+    while any(t["remaining_qty"] > 0 for t in all_task_instances):
         current_day = (current_time_minutes // workday_minutes) + 1
         current_slot = (current_time_minutes % workday_minutes) // slot_duration_minutes
 
@@ -113,7 +111,7 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
 
         worker_assignments = {}
 
-        # First slot logic
+        # First slot logic: prep tasks first
         if current_time_minutes == 0 and open_paper_tasks:
             for w in workers:
                 if open_paper_tasks:
@@ -121,16 +119,16 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
         else:
             for w in workers:
                 last_task = worker_last_task[w]
-                if last_task:
-                    # Pick best similarity, tie-breaker by remaining qty
+                if last_task and available_tasks:
+                    # Pick best similarity, tie-breaker by qty
                     best_task = max(
                         available_tasks,
                         key=lambda t: (cosine_similarity(last_task["vector"], t["vector"]), t["remaining_qty"])
                     )
                 else:
-                    # First task after prep phase: pick biggest remaining qty
-                    best_task = max(available_tasks, key=lambda t: t["remaining_qty"])
-                worker_assignments[w] = best_task
+                    best_task = max(available_tasks, key=lambda t: t["remaining_qty"]) if available_tasks else None
+                if best_task:
+                    worker_assignments[w] = best_task
 
         # Process assignments
         for w, task in worker_assignments.items():
@@ -165,7 +163,9 @@ def assign_tasks(products_to_produce, workers, products_df, slot_duration_minute
             worker_last_task[w] = task
 
         current_time_minutes += slot_duration_minutes
-        if current_time_minutes > 48 * 30:  # Safety cap
+
+        # Add a large safety cap for runaway loops
+        if current_time_minutes > 100000:  # ~2000 slots, just in case
             break
 
     return {
@@ -201,7 +201,7 @@ def main():
     page = st.sidebar.radio("Go to", ["Home","Products","Workers","Production Order"])
     if page == "Home":
         st.header("Welcome")
-        st.write("Cosine similarity-based scheduling with strict prerequisites.")
+        st.write("Cosine similarity-based scheduling with overlap rule.")
     elif page == "Products":
         st.header("📦 Product Database")
         st.dataframe(products_df, use_container_width=True)
