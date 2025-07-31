@@ -24,11 +24,11 @@ def format_time(minutes):
     minute = minutes % 60
     return f"{hour:02d}:{minute:02d}"
 
-def check_requirements_met(task, inventory, required_qty):
+def check_requirements_met(task, inventory, required_qty, threshold=0.3):
     if not task["requirements"]:
         return True
     for req in task["requirements"]:
-        if inventory[req] < required_qty:
+        if inventory[req] < required_qty * threshold:
             return False
     return True
 
