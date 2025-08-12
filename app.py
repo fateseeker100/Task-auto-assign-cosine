@@ -212,13 +212,13 @@ def main():
         st.header("Welcome")
         st.write("Cosine similarity-based scheduling with strict prerequisites.")
     elif page == "Products":
-        st.header("📦 Product Database")
+        st.header("Product Database")
         st.dataframe(products_df, use_container_width=True)
     elif page == "Workers":
-        st.header("👥 Worker Database")
+        st.header("Worker Database")
         st.dataframe(workers_df, use_container_width=True)
     elif page == "Production Order":
-        st.header("🎯 Production Order")
+        st.header("Production Order")
         products_to_produce = {}
         for product in products_df["Product"].unique():
             qty = st.number_input(f"{product}", min_value=0, max_value=1000, value=0, step=1)
@@ -235,3 +235,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
